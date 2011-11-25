@@ -1,24 +1,16 @@
 Backbone.CacheStore = {
 
   get: function(key){
-    console.log('get');
     this._store || this.reset();
-    console.log(key);
-    console.log(this._store);
-    console.log(this._store);
     return this._store[key];
   },
 
   set: function(key, object){
-    console.log('set');
     this._store || this.reset();
-    console.log(key);
     this._store[key] = object;
-    console.log(this._store);
   },
 
   reset: function(){
-    console.log('reset');
     this._store = new Object;
   }
 
@@ -35,7 +27,6 @@ Backbone.Model = function(attributes, options) {
   attributes || (attributes = {});
   var foundExisting = false;
   var instance;
-  console.log(attributes);
 
   if(attributes.id && this.keepInSync ){
 
@@ -43,10 +34,7 @@ Backbone.Model = function(attributes, options) {
 
     if(instance === undefined){
       instance = this;
-      console.log('not found');
     }else{
-      console.log('found');
-      console.log(instance);
       foundExisting = true;
       return instance;
     }
