@@ -15,6 +15,11 @@ Backbone.CacheStore = {
   }
 
 }
+  
+  var getUrl = function(object) {
+    if (!(object && object.url)) return null;
+    return _.isFunction(object.url) ? object.url() : object.url;
+  };
 
 // Backbone.Model
 // --------------
@@ -24,7 +29,7 @@ Backbone.CacheStore = {
 Backbone.Model = function(attributes, options) {
 
   var defaults;
-  attributes || (attributes = {});
+  var attrs = attributes || {};
   var foundExisting = false;
   var instance;
 
@@ -36,22 +41,23 @@ Backbone.Model = function(attributes, options) {
       instance = this;
     }else{
       foundExisting = true;
+      // Update the attributes and fire a change event anyway
+      instance.set(attributes) 
       return instance;
     }
 
   }
-
-  if (defaults = this.defaults) {
-    if (_.isFunction(defaults)) defaults = defaults();
-    attributes = _.extend({}, defaults, attributes);
-  }
-  this.attributes = {};
-  this._escapedAttributes = {};
+  
   this.cid = _.uniqueId('c');
-  this.set(attributes, {silent : true});
-  this._changed = false;
-  this._previousAttributes = _.clone(this.attributes);
+  this.changed = {};
+  this.attributes = {};
+  this._changes = [];
   if (options && options.collection) this.collection = options.collection;
+  if (options && options.parse) attrs = this.parse(attrs);
+  if (defaults = _.result(this, 'defaults')) _.defaults(attrs, defaults);
+  this.set(attrs, {silent: true});
+  this._currentAttributes = _.clone(this.attributes);
+  this._previousAttributes = _.clone(this.attributes);
   this.initialize.apply(this, arguments);
 
   if(this.keepInSync && !foundExisting){
@@ -63,261 +69,336 @@ Backbone.Model = function(attributes, options) {
 // Attach all inheritable methods to the Model prototype.
 _.extend(Backbone.Model.prototype, Backbone.Events, {
 
-  // A snapshot of the model's previous attributes, taken immediately
-  // after the last `"change"` event was fired.
-  _previousAttributes : null,
+    // A hash of attributes whose current and previous value differ.
+    changed: null,
 
-  // Has the item been changed since the last `"change"` event?
-  _changed : false,
+    // The default name for the JSON `id` attribute is `"id"`. MongoDB and
+    // CouchDB users may want to set this to `"_id"`.
+    idAttribute: 'id',
 
-  // The default name for the JSON `id` attribute is `"id"`. MongoDB and
-  // CouchDB users may want to set this to `"_id"`.
-  idAttribute : 'id',
+    // Initialize is an empty function by default. Override it with your own
+    // initialization logic.
+    initialize: function(){},
 
-  // Initialize is an empty function by default. Override it with your own
-  // initialization logic.
-  initialize : function(){},
+    // Return a copy of the model's `attributes` object.
+    toJSON: function(options) {
+      return _.clone(this.attributes);
+    },
 
-  // Return a copy of the model's `attributes` object.
-  toJSON : function() {
-    return _.clone(this.attributes);
-  },
+    // Proxy `Backbone.sync` by default.
+    sync: function() {
+      return Backbone.sync.apply(this, arguments);
+    },
 
-  // Get the value of an attribute.
-  get : function(attr) {
-    return this.attributes[attr];
-  },
+    // Get the value of an attribute.
+    get: function(attr) {
+      return this.attributes[attr];
+    },
 
-  // Get the HTML-escaped value of an attribute.
-  escape : function(attr) {
-    var html;
-    if (html = this._escapedAttributes[attr]) return html;
-    var val = this.attributes[attr];
-    return this._escapedAttributes[attr] = escapeHTML(val == null ? '' : '' + val);
-  },
+    // Get the HTML-escaped value of an attribute.
+    escape: function(attr) {
+      return _.escape(this.get(attr));
+    },
 
-  // Returns `true` if the attribute contains a value that is not null
-  // or undefined.
-  has : function(attr) {
-    return this.attributes[attr] != null;
-  },
+    // Returns `true` if the attribute contains a value that is not null
+    // or undefined.
+    has: function(attr) {
+      return this.get(attr) != null;
+    },
 
-  // Set a hash of model attributes on the object, firing `"change"` unless you
-  // choose to silence it.
-  set : function(attrs, options) {
+    // Set a hash of model attributes on the object, firing `"change"` unless
+    // you choose to silence it.
+    set: function(key, val, options) {
+      var attr, attrs;
+      if (key == null) return this;
 
-    // Extract attributes and options.
-    options || (options = {});
-    if (!attrs) return this;
-    if (attrs.attributes) attrs = attrs.attributes;
-    var now = this.attributes, escaped = this._escapedAttributes;
-
-    // Run validation.
-    if (!options.silent && this.validate && !this._performValidation(attrs, options)) return false;
-
-    // Check for changes of `id`.
-    if (this.idAttribute in attrs) this.id = attrs[this.idAttribute];
-
-    // We're about to start triggering change events.
-    var alreadyChanging = this._changing;
-    this._changing = true;
-
-    // Update attributes.
-    for (var attr in attrs) {
-      var val = attrs[attr];
-      if (!_.isEqual(now[attr], val)) {
-        now[attr] = val;
-        delete escaped[attr];
-        this._changed = true;
-        if (!options.silent) this.trigger('change:' + attr, this, val, options);
-      }
-    }
-
-    // Fire the `"change"` event, if the model has been changed.
-    if (!alreadyChanging && !options.silent && this._changed) this.change(options);
-    this._changing = false;
-    return this;
-  },
-
-  // Remove an attribute from the model, firing `"change"` unless you choose
-  // to silence it. `unset` is a noop if the attribute doesn't exist.
-  unset : function(attr, options) {
-    if (!(attr in this.attributes)) return this;
-    options || (options = {});
-    var value = this.attributes[attr];
-
-    // Run validation.
-    var validObj = {};
-    validObj[attr] = void 0;
-    if (!options.silent && this.validate && !this._performValidation(validObj, options)) return false;
-
-    // Remove the attribute.
-    delete this.attributes[attr];
-    delete this._escapedAttributes[attr];
-    if (attr == this.idAttribute) delete this.id;
-    this._changed = true;
-    if (!options.silent) {
-      this.trigger('change:' + attr, this, void 0, options);
-      this.change(options);
-    }
-    return this;
-  },
-
-  // Clear all attributes on the model, firing `"change"` unless you choose
-  // to silence it.
-  clear : function(options) {
-    options || (options = {});
-    var old = this.attributes;
-
-    // Run validation.
-    var validObj = {};
-    for (var attr in old) validObj[attr] = void 0;
-    if (!options.silent && this.validate && !this._performValidation(validObj, options)) return false;
-
-    this.attributes = {};
-    this._escapedAttributes = {};
-    this._changed = true;
-    if (!options.silent) {
-      for (var attr in old) {
-        this.trigger('change:' + attr, this, void 0, options);
-      }
-      this.change(options);
-    }
-    return this;
-  },
-
-  // Fetch the model from the server. If the server's representation of the
-  // model differs from its current attributes, they will be overriden,
-  // triggering a `"change"` event.
-  fetch : function(options) {
-    options || (options = {});
-    var model = this;
-    var success = options.success;
-    options.success = function(resp, status, xhr) {
-      if (!model.set(model.parse(resp, xhr), options)) return false;
-      if (success) success(model, resp);
-    };
-    options.error = wrapError(options.error, model, options);
-    return (this.sync || Backbone.sync).call(this, 'read', this, options);
-  },
-
-  // Set a hash of model attributes, and sync the model to the server.
-  // If the server returns an attributes hash that differs, the model's
-  // state will be `set` again.
-  save : function(attrs, options) {
-    options || (options = {});
-    if (attrs && !this.set(attrs, options)) return false;
-    var model = this;
-    var success = options.success;
-    options.success = function(resp, status, xhr) {
-      if (!model.set(model.parse(resp, xhr), options)) return false;
-      if (success) success(model, resp, xhr);
-    };
-    options.error = wrapError(options.error, model, options);
-    var method = this.isNew() ? 'create' : 'update';
-    return (this.sync || Backbone.sync).call(this, method, this, options);
-  },
-
-  // Destroy this model on the server if it was already persisted. Upon success, the model is removed
-  // from its collection, if it has one.
-  destroy : function(options) {
-    options || (options = {});
-    if (this.isNew()) return this.trigger('destroy', this, this.collection, options);
-    var model = this;
-    var success = options.success;
-    options.success = function(resp) {
-      model.trigger('destroy', model, model.collection, options);
-      if (success) success(model, resp);
-    };
-    options.error = wrapError(options.error, model, options);
-    return (this.sync || Backbone.sync).call(this, 'delete', this, options);
-  },
-
-  // Default URL for the model's representation on the server -- if you're
-  // using Backbone's restful methods, override this to change the endpoint
-  // that will be called.
-  url : function() {
-    var base = getUrl(this.collection) || this.urlRoot || urlError();
-    if (this.isNew()) return base;
-    return base + (base.charAt(base.length - 1) == '/' ? '' : '/') + encodeURIComponent(this.id);
-  },
-
-  // **parse** converts a response into the hash of attributes to be `set` on
-  // the model. The default implementation is just to pass the response along.
-  parse : function(resp, xhr) {
-    return resp;
-  },
-
-  // Create a new model with identical attributes to this one.
-  clone : function() {
-    return new this.constructor(this);
-  },
-
-  // A model is new if it has never been saved to the server, and lacks an id.
-  isNew : function() {
-    return this.id == null;
-  },
-
-  // Call this method to manually fire a `change` event for this model.
-  // Calling this will cause all objects observing the model to update.
-  change : function(options) {
-    this.trigger('change', this, options);
-    this._previousAttributes = _.clone(this.attributes);
-    this._changed = false;
-  },
-
-  // Determine if the model has changed since the last `"change"` event.
-  // If you specify an attribute name, determine if that attribute has changed.
-  hasChanged : function(attr) {
-    if (attr) return this._previousAttributes[attr] != this.attributes[attr];
-    return this._changed;
-  },
-
-  // Return an object containing all the attributes that have changed, or false
-  // if there are no changed attributes. Useful for determining what parts of a
-  // view need to be updated and/or what attributes need to be persisted to
-  // the server.
-  changedAttributes : function(now) {
-    now || (now = this.attributes);
-    var old = this._previousAttributes;
-    var changed = false;
-    for (var attr in now) {
-      if (!_.isEqual(old[attr], now[attr])) {
-        changed = changed || {};
-        changed[attr] = now[attr];
-      }
-    }
-    return changed;
-  },
-
-  // Get the previous value of an attribute, recorded at the time the last
-  // `"change"` event was fired.
-  previous : function(attr) {
-    if (!attr || !this._previousAttributes) return null;
-    return this._previousAttributes[attr];
-  },
-
-  // Get all of the attributes of the model at the time of the previous
-  // `"change"` event.
-  previousAttributes : function() {
-    return _.clone(this._previousAttributes);
-  },
-
-  // Run validation against a set of incoming attributes, returning `true`
-  // if all is well. If a specific `error` callback has been passed,
-  // call that instead of firing the general `"error"` event.
-  _performValidation : function(attrs, options) {
-    var error = this.validate(attrs);
-    if (error) {
-      if (options.error) {
-        options.error(this, error, options);
+      // Handle both `"key", value` and `{key: value}` -style arguments.
+      if (_.isObject(key)) {
+        attrs = key;
+        options = val;
       } else {
-        this.trigger('error', this, error, options);
+        (attrs = {})[key] = val;
       }
+
+      // Extract attributes and options.
+      var silent = options && options.silent;
+      var unset = options && options.unset;
+
+      // Run validation.
+      if (!this._validate(attrs, options)) return false;
+
+      // Check for changes of `id`.
+      if (this.idAttribute in attrs) this.id = attrs[this.idAttribute];
+
+      var now = this.attributes;
+
+      // For each `set` attribute...
+      for (attr in attrs) {
+        val = attrs[attr];
+
+        // Update or delete the current value, and track the change.
+        unset ? delete now[attr] : now[attr] = val;
+        this._changes.push(attr, val);
+      }
+
+      // Signal that the model's state has potentially changed, and we need
+      // to recompute the actual changes.
+      this._hasComputed = false;
+
+      // Fire the `"change"` events.
+      if (!silent) this.change(options);
+      return this;
+    },
+
+    // Remove an attribute from the model, firing `"change"` unless you choose
+    // to silence it. `unset` is a noop if the attribute doesn't exist.
+    unset: function(attr, options) {
+      return this.set(attr, void 0, _.extend({}, options, {unset: true}));
+    },
+
+    // Clear all attributes on the model, firing `"change"` unless you choose
+    // to silence it.
+    clear: function(options) {
+      var attrs = {};
+      for (var key in this.attributes) attrs[key] = void 0;
+      return this.set(attrs, _.extend({}, options, {unset: true}));
+    },
+
+    // Fetch the model from the server. If the server's representation of the
+    // model differs from its current attributes, they will be overriden,
+    // triggering a `"change"` event.
+    fetch: function(options) {
+      options = options ? _.clone(options) : {};
+      if (options.parse === void 0) options.parse = true;
+      var model = this;
+      var success = options.success;
+      options.success = function(resp, status, xhr) {
+        if (!model.set(model.parse(resp), options)) return false;
+        if (success) success(model, resp, options);
+      };
+      return this.sync('read', this, options);
+    },
+
+    // Set a hash of model attributes, and sync the model to the server.
+    // If the server returns an attributes hash that differs, the model's
+    // state will be `set` again.
+    save: function(key, val, options) {
+      var attrs, current, done;
+
+      // Handle both `"key", value` and `{key: value}` -style arguments.
+      if (key == null || _.isObject(key)) {
+        attrs = key;
+        options = val;
+      } else if (key != null) {
+        (attrs = {})[key] = val;
+      }
+      options = options ? _.clone(options) : {};
+
+      // If we're "wait"-ing to set changed attributes, validate early.
+      if (options.wait) {
+        if (attrs && !this._validate(attrs, options)) return false;
+        current = _.clone(this.attributes);
+      }
+
+      // Regular saves `set` attributes before persisting to the server.
+      var silentOptions = _.extend({}, options, {silent: true});
+      if (attrs && !this.set(attrs, options.wait ? silentOptions : options)) {
+        return false;
+      }
+
+      // Do not persist invalid models.
+      if (!attrs && !this._validate(null, options)) return false;
+
+      // After a successful server-side save, the client is (optionally)
+      // updated with the server-side state.
+      var model = this;
+      var success = options.success;
+      options.success = function(resp, status, xhr) {
+        done = true;
+        var serverAttrs = model.parse(resp);
+        if (options.wait) serverAttrs = _.extend(attrs || {}, serverAttrs);
+        if (!model.set(serverAttrs, options)) return false;
+        if (success) success(model, resp, options);
+      };
+
+      // Finish configuring and sending the Ajax request.
+      var method = this.isNew() ? 'create' : (options.patch ? 'patch' : 'update');
+      if (method == 'patch') options.attrs = attrs;
+      var xhr = this.sync(method, this, options);
+
+      // When using `wait`, reset attributes to original values unless
+      // `success` has been called already.
+      if (!done && options.wait) {
+        this.clear(silentOptions);
+        this.set(current, silentOptions);
+      }
+
+      return xhr;
+    },
+
+    // Destroy this model on the server if it was already persisted.
+    // Optimistically removes the model from its collection, if it has one.
+    // If `wait: true` is passed, waits for the server to respond before removal.
+    destroy: function(options) {
+      options = options ? _.clone(options) : {};
+      var model = this;
+      var success = options.success;
+
+      var destroy = function() {
+        model.trigger('destroy', model, model.collection, options);
+      };
+
+      options.success = function(resp) {
+        if (options.wait || model.isNew()) destroy();
+        if (success) success(model, resp, options);
+      };
+
+      if (this.isNew()) {
+        options.success();
+        return false;
+      }
+
+      var xhr = this.sync('delete', this, options);
+      if (!options.wait) destroy();
+      return xhr;
+    },
+
+    // Default URL for the model's representation on the server -- if you're
+    // using Backbone's restful methods, override this to change the endpoint
+    // that will be called.
+    url: function() {
+      var base = _.result(this, 'urlRoot') || _.result(this.collection, 'url') || urlError();
+      if (this.isNew()) return base;
+      return base + (base.charAt(base.length - 1) === '/' ? '' : '/') + encodeURIComponent(this.id);
+    },
+
+    // **parse** converts a response into the hash of attributes to be `set` on
+    // the model. The default implementation is just to pass the response along.
+    parse: function(resp) {
+      return resp;
+    },
+
+    // Create a new model with identical attributes to this one.
+    clone: function() {
+      return new this.constructor(this.attributes);
+    },
+
+    // A model is new if it has never been saved to the server, and lacks an id.
+    isNew: function() {
+      return this.id == null;
+    },
+
+    // Call this method to manually fire a `"change"` event for this model and
+    // a `"change:attribute"` event for each changed attribute.
+    // Calling this will cause all objects observing the model to update.
+    change: function(options) {
+      var changing = this._changing;
+      this._changing = true;
+
+      // Generate the changes to be triggered on the model.
+      var triggers = this._computeChanges(true);
+
+      this._pending = !!triggers.length;
+
+      for (var i = triggers.length - 2; i >= 0; i -= 2) {
+        this.trigger('change:' + triggers[i], this, triggers[i + 1], options);
+      }
+
+      if (changing) return this;
+
+      // Trigger a `change` while there have been changes.
+      while (this._pending) {
+        this._pending = false;
+        this.trigger('change', this, options);
+        this._previousAttributes = _.clone(this.attributes);
+      }
+
+      this._changing = false;
+      return this;
+    },
+
+    // Determine if the model has changed since the last `"change"` event.
+    // If you specify an attribute name, determine if that attribute has changed.
+    hasChanged: function(attr) {
+      if (!this._hasComputed) this._computeChanges();
+      if (attr == null) return !_.isEmpty(this.changed);
+      return _.has(this.changed, attr);
+    },
+
+    // Return an object containing all the attributes that have changed, or
+    // false if there are no changed attributes. Useful for determining what
+    // parts of a view need to be updated and/or what attributes need to be
+    // persisted to the server. Unset attributes will be set to undefined.
+    // You can also pass an attributes object to diff against the model,
+    // determining if there *would be* a change.
+    changedAttributes: function(diff) {
+      if (!diff) return this.hasChanged() ? _.clone(this.changed) : false;
+      var val, changed = false, old = this._previousAttributes;
+      for (var attr in diff) {
+        if (_.isEqual(old[attr], (val = diff[attr]))) continue;
+        (changed || (changed = {}))[attr] = val;
+      }
+      return changed;
+    },
+
+    // Looking at the built up list of `set` attribute changes, compute how
+    // many of the attributes have actually changed. If `loud`, return a
+    // boiled-down list of only the real changes.
+    _computeChanges: function(loud) {
+      this.changed = {};
+      var already = {};
+      var triggers = [];
+      var current = this._currentAttributes;
+      var changes = this._changes;
+
+      // Loop through the current queue of potential model changes.
+      for (var i = changes.length - 2; i >= 0; i -= 2) {
+        var key = changes[i], val = changes[i + 1];
+        if (already[key]) continue;
+        already[key] = true;
+
+        // Check if the attribute has been modified since the last change,
+        // and update `this.changed` accordingly. If we're inside of a `change`
+        // call, also add a trigger to the list.
+        if (current[key] !== val) {
+          this.changed[key] = val;
+          if (!loud) continue;
+          triggers.push(key, val);
+          current[key] = val;
+        }
+      }
+      if (loud) this._changes = [];
+
+      // Signals `this.changed` is current to prevent duplicate calls from `this.hasChanged`.
+      this._hasComputed = true;
+      return triggers;
+    },
+
+    // Get the previous value of an attribute, recorded at the time the last
+    // `"change"` event was fired.
+    previous: function(attr) {
+      if (attr == null || !this._previousAttributes) return null;
+      return this._previousAttributes[attr];
+    },
+
+    // Get all of the attributes of the model at the time of the previous
+    // `"change"` event.
+    previousAttributes: function() {
+      return _.clone(this._previousAttributes);
+    },
+
+    // Run validation against the next complete set of model attributes,
+    // returning `true` if all is well. If a specific `error` callback has
+    // been passed, call that instead of firing the general `"error"` event.
+    _validate: function(attrs, options) {
+      if (!this.validate) return true;
+      attrs = _.extend({}, this.attributes, attrs);
+      var error = this.validate(attrs, options);
+      if (!error) return true;
+      if (options && options.error) options.error(this, error, options);
+      this.trigger('error', this, error, options);
       return false;
     }
-    return true;
-  }
 
 });
 
